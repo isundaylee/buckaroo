@@ -3,6 +3,7 @@ package com.loopperfect.buckaroo.tasks;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.loopperfect.buckaroo.*;
+import com.loopperfect.buckaroo.buck.BuckConfigFile;
 import com.loopperfect.buckaroo.events.ReadLockFileEvent;
 import io.reactivex.Observable;
 import io.reactivex.Single;
@@ -30,6 +31,35 @@ public final class InstallExistingTasks {
         return buckarooDirectory.resolve(identifier.source.map(x -> x.name).orElse("official"))
             .resolve(identifier.organization.name)
             .resolve(identifier.recipe.name);
+    }
+
+    private static String mergeBuckConfigs(final String libBuckConfig, final String projectBuckConfig) {
+        BuckConfigFile libConfig = BuckConfigFile.of(libBuckConfig);
+        BuckConfigFile projectConfig = BuckConfigFile.of(projectBuckConfig);
+
+        return BuckConfigFile.merge(projectConfig, libConfig).dumpContent();
+    }
+
+    private static Observable<Event> mergeRootProjectBuckConfig(final Path target, final Path projectDirectory) {
+        Preconditions.checkNotNull(target);
+        Preconditions.checkNotNull(projectDirectory);
+
+        return Observable.zip(
+            CommonTasks.readFile(target).toObservable(),
+            CommonTasks.readFile(projectDirectory.resolve(".buckconfig")).toObservable(),
+            InstallExistingTasks::mergeBuckConfigs
+        ).flatMap(mergedConfig -> CommonTasks.writeFile(mergedConfig, target, true).toObservable());
+    }
+
+    private static Observable<Event> generateBuckConfig(final Path target, final Path projectDirectory) {
+        return Observable.concat(
+            // Touch .buckconfig
+            CommonTasks.touchFile(target).toObservable(),
+
+            // Merge root project's .buckconfig into the libraries
+            // See: https://github.com/LoopPerfect/buckaroo/issues/131
+            mergeRootProjectBuckConfig(target, projectDirectory)
+        );
     }
 
     private static String generateBuckConfigLocal(final Path target, final Path projectDirectory, final ImmutableList<RecipeIdentifier> dependencies) {
@@ -101,8 +131,8 @@ public final class InstallExistingTasks {
             // Download the code and BUCK file
             downloadResolvedDependency(projectDirectory.getFileSystem(), lock.origin, dependencyDirectory),
 
-            // Touch .buckconfig
-            CommonTasks.touchFile(dependencyDirectory.resolve(".buckconfig")).toObservable(),
+            // Generate a .buckconfig for the library
+            generateBuckConfig(dependencyDirectory.resolve(".buckconfig"), projectDirectory),
 
             // Generate .buckconfig.local
             CommonTasks.writeFile(
